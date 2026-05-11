@@ -86,7 +86,43 @@ async function main() {
         console.log(`[${new Date().toLocaleTimeString()}] Submit attempt...`);
 
         try {
-          const tx = await contract.mine(BigInt(result.nonce));
+          // Re-check challenge before submitting - if it changed, someone else mined this epoch
+          const currentChallenge = await contract.getChallenge(wallet.address);
+          if (currentChallenge !== challenge) {
+            console.log("Challenge changed! Someone else mined this epoch first. Skipping...");
+            continue;
+          }
+
+          // Verify hash locally before submitting
+          const nonceBI = BigInt(result.nonce);
+          const localHash = ethers.solidityPackedKeccak256(
+            ["bytes32", "uint256"],
+            [challenge, nonceBI]
+          );
+          const localHashBI = BigInt(localHash);
+          const diffBI = difficulty;
+          
+          if (localHashBI >= diffBI) {
+            console.error("LOCAL VERIFY FAILED! Hash >= difficulty");
+            console.error("  Nonce:", result.nonce);
+            console.error("  Local hash:", localHash);
+            console.error("  GPU hash:  ", result.hash);
+            console.error("  Difficulty:", diffHex);
+            console.log("Skipping submit, re-mining...");
+            continue;
+          }
+          
+          console.log("Local verify OK ✓");
+
+          // Estimate gas first to catch revert early
+          try {
+            await contract.mine.estimateGas(nonceBI);
+          } catch (gasErr) {
+            console.error("Gas estimate failed (likely already mined):", gasErr.shortMessage || gasErr.message);
+            continue;
+          }
+
+          const tx = await contract.mine(nonceBI);
           console.log("Tx:", tx.hash);
           console.log(`https://etherscan.io/tx/${tx.hash}`);
 
