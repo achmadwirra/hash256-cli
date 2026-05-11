@@ -154,6 +154,8 @@ async function main() {
   }
 }
 
+const ROUND_TIMEOUT_MS = parseInt(process.env.ROUND_TIMEOUT || "600") * 1000; // default 10 min
+
 function runGpuMiner(challenge, difficulty, startNonce) {
   return new Promise((resolve, reject) => {
     const args = [challenge, difficulty, startNonce, BATCH_SIZE];
@@ -163,6 +165,13 @@ function runGpuMiner(challenge, difficulty, startNonce) {
 
     let stdout = "";
     let stderr = "";
+    let killed = false;
+
+    const timeout = setTimeout(() => {
+      killed = true;
+      proc.kill("SIGTERM");
+      console.log(`\nRound timeout (${ROUND_TIMEOUT_MS / 1000}s) — epoch likely changed. Restarting...`);
+    }, ROUND_TIMEOUT_MS);
 
     proc.stdout.on("data", (data) => {
       stdout += data.toString();
@@ -175,7 +184,10 @@ function runGpuMiner(challenge, difficulty, startNonce) {
     });
 
     proc.on("close", (code) => {
-      if (code === 0 && stdout.trim()) {
+      clearTimeout(timeout);
+      if (killed) {
+        resolve(null);
+      } else if (code === 0 && stdout.trim()) {
         try {
           const result = JSON.parse(stdout.trim().split("\n").pop());
           resolve(result);
@@ -192,6 +204,7 @@ function runGpuMiner(challenge, difficulty, startNonce) {
     });
 
     proc.on("error", (err) => {
+      clearTimeout(timeout);
       console.error("Failed to start miner binary:", err.message);
       console.error("Did you compile it? cd cuda && make");
       reject(err);
