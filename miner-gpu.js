@@ -86,14 +86,7 @@ async function main() {
         console.log(`[${new Date().toLocaleTimeString()}] Submit attempt...`);
 
         try {
-          // Re-check challenge before submitting - if it changed, someone else mined this epoch
-          const currentChallenge = await contract.getChallenge(wallet.address);
-          if (currentChallenge !== challenge) {
-            console.log("Challenge changed! Someone else mined this epoch first. Skipping...");
-            continue;
-          }
-
-          // Verify hash locally before submitting
+          // Verify hash locally before submitting (fast, no RPC)
           const nonceBI = BigInt(result.nonce);
           const localHash = ethers.solidityPackedKeccak256(
             ["bytes32", "uint256"],
@@ -114,25 +107,44 @@ async function main() {
           
           console.log("Local verify OK ✓");
 
-          // Estimate gas first to catch revert early
-          try {
-            await contract.mine.estimateGas(nonceBI);
-          } catch (gasErr) {
-            console.error("Gas estimate failed (likely already mined):", gasErr.shortMessage || gasErr.message);
+          // Re-check challenge before submitting - if it changed, someone else mined this epoch
+          const currentChallenge = await contract.getChallenge(wallet.address);
+          if (currentChallenge !== challenge) {
+            console.log("Challenge changed! Someone else mined this epoch first. Skipping...");
             continue;
           }
 
-          const tx = await contract.mine(nonceBI);
+          // Submit with aggressive gas to win race
+          const feeData = await provider.getFeeData();
+          const maxPriority = feeData.maxPriorityFeePerGas || 100000000n; // 0.1 gwei fallback
+          const boostPriority = maxPriority * 3n; // 3x priority to front-run
+          const maxFee = (feeData.maxFeePerGas || 1000000000n) + boostPriority;
+
+          console.log(`Submitting with priority ${ethers.formatUnits(boostPriority, "gwei")} gwei...`);
+
+          const tx = await contract.mine(nonceBI, {
+            maxPriorityFeePerGas: boostPriority,
+            maxFeePerGas: maxFee,
+          });
           console.log("Tx:", tx.hash);
           console.log(`https://etherscan.io/tx/${tx.hash}`);
 
           const receipt = await tx.wait();
-          console.log(
-            `Confirmed block ${receipt.blockNumber} (gas: ${receipt.gasUsed})`
-          );
-          console.log(`HASH: ${ethers.formatUnits(state.reward, 18)} (session: ${session})`);
+          if (receipt.status === 1) {
+            console.log(
+              `✅ Confirmed block ${receipt.blockNumber} (gas: ${receipt.gasUsed})`
+            );
+            console.log(`HASH: ${ethers.formatUnits(state.reward, 18)} (session: ${session})`);
+          } else {
+            console.log("❌ TX reverted on-chain (race lost)");
+          }
         } catch (err) {
-          console.error("TX failed:", err.shortMessage || err.message);
+          const msg = err.shortMessage || err.message || "";
+          if (msg.includes("revert") || msg.includes("execution")) {
+            console.log("Race lost — epoch already mined. Next round...");
+          } else {
+            console.error("TX failed:", msg);
+          }
         }
       }
     } catch (err) {
