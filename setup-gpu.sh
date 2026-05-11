@@ -28,8 +28,10 @@ if echo "$GPU_NAME" | grep -qiE "RTX 30[0-9]0|A100|A6000"; then
     ARCH="sm_86"
 elif echo "$GPU_NAME" | grep -qiE "RTX 40[0-9]0|L40|L4"; then
     ARCH="sm_89"
-elif echo "$GPU_NAME" | grep -qiE "RTX 50[0-9]0|B100|B200"; then
+elif echo "$GPU_NAME" | grep -qiE "B100|B200"; then
     ARCH="sm_100"
+elif echo "$GPU_NAME" | grep -qiE "RTX 50[0-9]0|RTX PRO.*Blackwell|Blackwell"; then
+    ARCH="sm_120"
 fi
 
 echo "Detected: $GPU_NAME -> $ARCH"
