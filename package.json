@@ -6,6 +6,8 @@
   "scripts": {
     "start": "node miner.js",
     "turbo": "node miner-turbo.js",
+    "gpu": "node miner-gpu.js",
+    "build-gpu": "cd cuda && make",
     "check": "node check-state.js"
   },
   "keywords": [
