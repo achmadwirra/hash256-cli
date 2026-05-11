@@ -1,33 +1,38 @@
 #!/bin/bash
-# Multi-GPU Multi-Wallet Mining Launcher
+# Multi-GPU Mining Launcher (single wallet, all GPUs)
 # Usage: ./start-multi.sh
-# Requires: .env with RPC_URL, WALLET_0 and WALLET_1 private keys set below
+# Requires: .env with RPC_URL and PRIVATE_KEY
 
 source .env
 
-WALLET_0="${PRIVATE_KEY}"
-WALLET_1="${PRIVATE_KEY_2}"
-
-if [ -z "$WALLET_0" ] || [ -z "$WALLET_1" ]; then
-  echo "ERROR: Set PRIVATE_KEY and PRIVATE_KEY_2 in .env"
-  echo ""
-  echo "Generate a new wallet: node gen-wallet.js"
-  echo "Then add PRIVATE_KEY_2=0x... to .env"
+if [ -z "$PRIVATE_KEY" ] || [ -z "$RPC_URL" ]; then
+  echo "ERROR: Set RPC_URL and PRIVATE_KEY in .env"
   exit 1
 fi
 
+GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l)
+if [ "$GPU_COUNT" -eq 0 ]; then
+  echo "ERROR: No GPUs detected"
+  exit 1
+fi
+
+echo "Detected $GPU_COUNT GPU(s)"
+echo "Wallet: $(echo $PRIVATE_KEY | head -c 10)..."
+echo ""
+
 echo "Killing existing mining sessions..."
 screen -ls | grep -oP '\d+\.gpu\d+' | xargs -I{} screen -X -S {} quit 2>/dev/null
+sleep 1
 
-echo "Starting GPU 0 with wallet 0..."
-screen -dmS gpu0 bash -c "cd $(pwd) && PRIVATE_KEY=$WALLET_0 CUDA_VISIBLE_DEVICES=0 node miner-gpu.js"
-
-echo "Starting GPU 1 with wallet 1..."
-screen -dmS gpu1 bash -c "cd $(pwd) && PRIVATE_KEY=$WALLET_1 CUDA_VISIBLE_DEVICES=1 node miner-gpu.js"
+for i in $(seq 0 $((GPU_COUNT - 1))); do
+  echo "Starting GPU $i..."
+  screen -dmS gpu$i bash -c "cd $(pwd) && CUDA_VISIBLE_DEVICES=$i node miner-gpu.js"
+done
 
 echo ""
-echo "Mining started!"
-echo "  GPU 0 → screen -r gpu0"
-echo "  GPU 1 → screen -r gpu1"
+echo "Mining started! ($GPU_COUNT GPUs, same wallet)"
+for i in $(seq 0 $((GPU_COUNT - 1))); do
+  echo "  GPU $i → screen -r gpu$i"
+done
 echo ""
 screen -ls | grep gpu

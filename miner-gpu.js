@@ -1,13 +1,7 @@
-// HASH256 GPU Miner - Node.js Orchestrator
-// Wraps the CUDA binary: fetches challenge from contract, runs GPU miner, submits tx
-//
-// Usage: node miner-gpu.js
-// Requires: ./cuda/hash256_miner binary (compile with: cd cuda && make)
-
 require("dotenv").config();
 
 const { ethers } = require("ethers");
-const { execSync, spawn } = require("child_process");
+const { spawn } = require("child_process");
 const path = require("path");
 const crypto = require("crypto");
 
@@ -15,12 +9,15 @@ const RPC_URL = process.env.RPC_URL;
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const CONTRACT_ADDRESS = "0xAC7b5d06fa1e77D08aea40d46cB7C5923A87A0cc";
 const MINER_BINARY = path.join(__dirname, "cuda", "hash256_miner");
-const BATCH_SIZE = process.env.GPU_BATCH_SIZE || "268435456";
+const BATCH_SIZE = process.env.GPU_BATCH_SIZE || "0";
+const GPU_ID = process.env.CUDA_VISIBLE_DEVICES || "0";
+const PRIORITY_GWEI = BigInt(process.env.PRIORITY_GWEI || "10");
 
 const ABI = [
   "function getChallenge(address miner) view returns (bytes32)",
   "function miningState() view returns (uint256 era, uint256 reward, uint256 difficulty, uint256 minted, uint256 remaining, uint256 epoch, uint256 epochBlocksLeft_)",
   "function mine(uint256 nonce)",
+  "function getNonce(address miner) view returns (uint256)",
 ];
 
 function requireEnv() {
@@ -43,32 +40,32 @@ async function main() {
   const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, wallet);
 
   console.log("=".repeat(55));
-  console.log("  HASH256 GPU Miner (CUDA)");
+  console.log("  HASH256 GPU Miner v2 (Optimized)");
   console.log("=".repeat(55));
   console.log("Wallet  :", wallet.address);
-  console.log("Contract:", CONTRACT_ADDRESS);
-  console.log("Binary  :", MINER_BINARY);
-  console.log("Batch   :", parseInt(BATCH_SIZE).toLocaleString(), "hashes/launch");
+  console.log("GPU     :", GPU_ID);
+  console.log("Priority:", PRIORITY_GWEI.toString(), "gwei");
   console.log("=".repeat(55));
 
   let session = 0;
+  let consecutiveFails = 0;
 
   while (true) {
     session++;
     try {
-      const state = await contract.miningState();
-      const difficulty = state.difficulty;
-      const challenge = await contract.getChallenge(wallet.address);
+      const [state, challenge, feeData] = await Promise.all([
+        contract.miningState(),
+        contract.getChallenge(wallet.address),
+        provider.getFeeData(),
+      ]);
 
+      const difficulty = state.difficulty;
       const diffHex = "0x" + difficulty.toString(16).padStart(64, "0");
 
       console.log("");
-      console.log(`── Round ${session} [${new Date().toLocaleTimeString()}] ──`);
-      console.log("Era       :", state.era.toString());
-      console.log("Reward    :", ethers.formatUnits(state.reward, 18), "HASH");
-      console.log("Difficulty:", diffHex);
-      console.log("Epoch     :", state.epoch.toString());
-      console.log("Challenge :", challenge);
+      console.log(`── Round ${session} [${new Date().toLocaleTimeString()}] GPU:${GPU_ID} ──`);
+      console.log("Difficulty:", diffHex.slice(0, 20) + "...");
+      console.log("Epoch     :", state.epoch.toString(), `(${state.epochBlocksLeft_.toString()} blocks left)`);
 
       const startNonce = randomNonceHex();
 
@@ -76,85 +73,68 @@ async function main() {
       const result = await runGpuMiner(challenge, diffHex, startNonce);
 
       if (result) {
-        console.log("");
-        console.log("*** SOLUTION FOUND ***");
-        console.log("Nonce :", result.nonce);
-        console.log("Hash  :", result.hash);
-        console.log("Stats :", `${result.hashrate} GH/s, ${result.elapsed}s`);
+        console.log(`*** FOUND *** ${result.hashrate} GH/s, ${result.elapsed}s`);
 
-        console.log("");
-        console.log(`[${new Date().toLocaleTimeString()}] Submit attempt...`);
+        const nonceBI = BigInt(result.nonce);
+        const localHash = ethers.solidityPackedKeccak256(
+          ["bytes32", "uint256"],
+          [challenge, nonceBI]
+        );
+
+        if (BigInt(localHash) >= difficulty) {
+          console.error("LOCAL VERIFY FAILED — skipping");
+          continue;
+        }
+
+        const currentChallenge = await contract.getChallenge(wallet.address);
+        if (currentChallenge !== challenge) {
+          console.log("Challenge changed — epoch rotated. Next round...");
+          continue;
+        }
+
+        const boostPriority = PRIORITY_GWEI * 1000000000n;
+        const baseFee = feeData.maxFeePerGas || 1000000000n;
+        const maxFee = baseFee + boostPriority;
 
         try {
-          // Verify hash locally before submitting (fast, no RPC)
-          const nonceBI = BigInt(result.nonce);
-          const localHash = ethers.solidityPackedKeccak256(
-            ["bytes32", "uint256"],
-            [challenge, nonceBI]
-          );
-          const localHashBI = BigInt(localHash);
-          const diffBI = difficulty;
-          
-          if (localHashBI >= diffBI) {
-            console.error("LOCAL VERIFY FAILED! Hash >= difficulty");
-            console.error("  Nonce:", result.nonce);
-            console.error("  Local hash:", localHash);
-            console.error("  GPU hash:  ", result.hash);
-            console.error("  Difficulty:", diffHex);
-            console.log("Skipping submit, re-mining...");
-            continue;
-          }
-          
-          console.log("Local verify OK ✓");
-
-          // Re-check challenge before submitting - if it changed, someone else mined this epoch
-          const currentChallenge = await contract.getChallenge(wallet.address);
-          if (currentChallenge !== challenge) {
-            console.log("Challenge changed! Someone else mined this epoch first. Skipping...");
-            continue;
-          }
-
-          const feeData = await provider.getFeeData();
-          const baseFee = feeData.maxFeePerGas || 1000000000n;
-          const boostPriority = 10000000000n; // 10 gwei priority
-          const maxFee = baseFee + boostPriority;
-
-          console.log(`Submitting with priority ${ethers.formatUnits(boostPriority, "gwei")} gwei...`);
-
           const tx = await contract.mine(nonceBI, {
             maxPriorityFeePerGas: boostPriority,
             maxFeePerGas: maxFee,
           });
-          console.log("Tx:", tx.hash);
-          console.log(`https://etherscan.io/tx/${tx.hash}`);
+          console.log(`TX: ${tx.hash}`);
 
           const receipt = await tx.wait();
           if (receipt.status === 1) {
-            console.log(
-              `✅ Confirmed block ${receipt.blockNumber} (gas: ${receipt.gasUsed})`
-            );
-            console.log(`HASH: ${ethers.formatUnits(state.reward, 18)} (session: ${session})`);
+            console.log(`✅ Block ${receipt.blockNumber} | +${ethers.formatUnits(state.reward, 18)} HASH`);
+            consecutiveFails = 0;
           } else {
-            console.log("❌ TX reverted on-chain (race lost)");
+            console.log("❌ Reverted on-chain");
+            consecutiveFails++;
           }
         } catch (err) {
           const msg = err.shortMessage || err.message || "";
           if (msg.includes("revert") || msg.includes("execution")) {
-            console.log("Race lost — epoch already mined. Next round...");
+            console.log("Race lost — next round...");
           } else {
-            console.error("TX failed:", msg);
+            console.error("TX error:", msg);
           }
+          consecutiveFails++;
+        }
+
+        if (consecutiveFails >= 5) {
+          console.log("5 consecutive fails — cooling down 30s...");
+          await sleep(30000);
+          consecutiveFails = 0;
         }
       }
     } catch (err) {
       console.error("Round error:", err.shortMessage || err.message);
-      console.log("Retrying in 5s...");
       await sleep(5000);
     }
   }
 }
 
-const ROUND_TIMEOUT_MS = parseInt(process.env.ROUND_TIMEOUT || "600") * 1000; // default 10 min
+const ROUND_TIMEOUT_MS = parseInt(process.env.ROUND_TIMEOUT || "600") * 1000;
 
 function runGpuMiner(challenge, difficulty, startNonce) {
   return new Promise((resolve, reject) => {
@@ -164,13 +144,12 @@ function runGpuMiner(challenge, difficulty, startNonce) {
     });
 
     let stdout = "";
-    let stderr = "";
     let killed = false;
 
     const timeout = setTimeout(() => {
       killed = true;
       proc.kill("SIGTERM");
-      console.log(`\nRound timeout (${ROUND_TIMEOUT_MS / 1000}s) — epoch likely changed. Restarting...`);
+      console.log(`\nTimeout (${ROUND_TIMEOUT_MS / 1000}s) — restarting...`);
     }, ROUND_TIMEOUT_MS);
 
     proc.stdout.on("data", (data) => {
@@ -178,9 +157,7 @@ function runGpuMiner(challenge, difficulty, startNonce) {
     });
 
     proc.stderr.on("data", (data) => {
-      const line = data.toString();
-      stderr += line;
-      process.stderr.write(line);
+      process.stderr.write(data.toString());
     });
 
     proc.on("close", (code) => {
@@ -192,21 +169,18 @@ function runGpuMiner(challenge, difficulty, startNonce) {
           const result = JSON.parse(stdout.trim().split("\n").pop());
           resolve(result);
         } catch (e) {
-          console.error("Failed to parse miner output:", stdout);
+          console.error("Parse error:", stdout);
           resolve(null);
         }
-      } else if (code !== 0) {
-        console.error("Miner exited with code:", code);
-        resolve(null);
       } else {
+        if (code !== 0) console.error("Miner exit code:", code);
         resolve(null);
       }
     });
 
     proc.on("error", (err) => {
       clearTimeout(timeout);
-      console.error("Failed to start miner binary:", err.message);
-      console.error("Did you compile it? cd cuda && make");
+      console.error("Binary not found:", err.message);
       reject(err);
     });
   });
