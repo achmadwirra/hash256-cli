@@ -221,7 +221,7 @@ int main(int argc, char** argv)
     int total_blocks = sm_count * blocks_per_sm;
     uint64_t total_threads = (uint64_t)total_blocks * opt_block_size;
 
-    uint32_t iterations = 16;
+    uint32_t iterations;
     if (batch_size > 0)
     {
         iterations = (uint32_t)(batch_size / total_threads);
@@ -229,6 +229,7 @@ int main(int argc, char** argv)
     }
     else
     {
+        iterations = 1536;
         batch_size = total_threads * iterations;
     }
 
