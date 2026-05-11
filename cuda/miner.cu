@@ -24,21 +24,25 @@ struct MiningResult {
 __device__ __constant__ uint64_t d_challenge[4];    // 32 bytes challenge
 __device__ __constant__ uint64_t d_difficulty[4];   // 32 bytes difficulty (target)
 
+// Byte-swap a uint64 (big-endian <-> little-endian)
+__device__ __forceinline__ uint64_t bswap64(uint64_t x)
+{
+    uint64_t lo = __byte_perm((uint32_t)x, 0, 0x0123);
+    uint64_t hi = __byte_perm((uint32_t)(x >> 32), 0, 0x0123);
+    return (lo << 32) | hi;
+}
+
 // Compare hash < difficulty (big-endian comparison)
-// Both are stored as uint64_t[4] in big-endian word order
+// hash: keccak output in little-endian lanes
+// difficulty: big-endian uint64[4] from hex parse
 __device__ __forceinline__ bool hash_less_than_difficulty(const uint64_t* hash, const uint64_t* difficulty)
 {
-    // Compare from most significant to least significant
-    // Note: keccak output is little-endian, difficulty from contract is big-endian
-    // We need to compare as big-endian 256-bit numbers
-    
-    // Byte-swap each uint64 for big-endian comparison
+    // Keccak output lanes are little-endian. To compare as big-endian 256-bit number,
+    // byte-swap each lane to get big-endian representation.
     #pragma unroll
     for (int i = 0; i < 4; i++)
     {
-        uint64_t h = __byte_perm(hash[i] >> 32, hash[i], 0x0123);
-        h = ((h & 0x00FF00FF00FF00FFULL) << 8) | ((h & 0xFF00FF00FF00FF00ULL) >> 8);
-        
+        uint64_t h = bswap64(hash[i]);
         uint64_t d = difficulty[i];
         
         if (h < d) return true;
@@ -65,25 +69,24 @@ __global__ void mine_kernel(
     uint64_t nonce_hi = start_nonce_hi;
     if (nonce_lo < start_nonce_lo) nonce_hi++; // overflow carry
 
-    // Build 64-byte input: challenge (32 bytes) || nonce (32 bytes big-endian)
+    // Build 64-byte input: challenge (32 bytes) || nonce (32 bytes)
+    // Keccak state absorbs data as LITTLE-ENDIAN uint64 lanes.
+    // abi.encodePacked(bytes32, uint256) produces 64 bytes in big-endian order.
+    // So we must byte-swap each uint64 from big-endian (hex parse) to little-endian (keccak lane).
     uint64_t input[8];
     
-    // Challenge bytes (already in correct byte order from contract)
-    input[0] = d_challenge[0];
-    input[1] = d_challenge[1];
-    input[2] = d_challenge[2];
-    input[3] = d_challenge[3];
+    // Challenge: stored as big-endian uint64[4] from hex parse, swap to LE for keccak
+    input[0] = bswap64(d_challenge[0]);
+    input[1] = bswap64(d_challenge[1]);
+    input[2] = bswap64(d_challenge[2]);
+    input[3] = bswap64(d_challenge[3]);
     
-    // Nonce as uint256 big-endian (Solidity abi.encodePacked stores uint256 as 32 bytes big-endian)
-    // nonce_hi goes first (most significant), then nonce_lo
-    // Each uint64 needs to be big-endian byte order
-    input[4] = 0;  // upper 128 bits = 0 (we only use 128-bit nonce space)
+    // Nonce as uint256: big-endian byte layout is [0][0][nonce_hi][nonce_lo]
+    // Swap each to little-endian for keccak lanes
+    input[4] = 0;  // upper 128 bits = 0
     input[5] = 0;
-    // Swap bytes for big-endian storage
-    input[6] = __byte_perm(nonce_hi >> 32, nonce_hi, 0x0123);
-    input[6] = ((input[6] & 0x00FF00FF00FF00FFULL) << 8) | ((input[6] & 0xFF00FF00FF00FF00ULL) >> 8);
-    input[7] = __byte_perm(nonce_lo >> 32, nonce_lo, 0x0123);
-    input[7] = ((input[7] & 0x00FF00FF00FF00FFULL) << 8) | ((input[7] & 0xFF00FF00FF00FF00ULL) >> 8);
+    input[6] = bswap64(nonce_hi);
+    input[7] = bswap64(nonce_lo);
 
     // Compute keccak256
     uint64_t hash[4];
@@ -252,7 +255,17 @@ int main(int argc, char** argv)
             char nonce_hex[67], hash_hex[67];
             uint64_t full_nonce[4] = {0, 0, h_result.nonce_hi, h_result.nonce_lo};
             uint64_to_hex(full_nonce, 4, nonce_hex);
-            uint64_to_hex(h_result.hash, 4, hash_hex);
+            
+            // Hash from keccak is in little-endian lanes - byte-swap each to big-endian for hex output
+            uint64_t hash_be[4];
+            for (int i = 0; i < 4; i++) {
+                uint64_t x = h_result.hash[i];
+                x = ((x & 0x00000000FFFFFFFFULL) << 32) | ((x & 0xFFFFFFFF00000000ULL) >> 32);
+                x = ((x & 0x0000FFFF0000FFFFULL) << 16) | ((x & 0xFFFF0000FFFF0000ULL) >> 16);
+                x = ((x & 0x00FF00FF00FF00FFULL) << 8)  | ((x & 0xFF00FF00FF00FF00ULL) >> 8);
+                hash_be[i] = x;
+            }
+            uint64_to_hex(hash_be, 4, hash_hex);
 
             fprintf(stderr, "\n*** SOLUTION FOUND ***\n");
             fprintf(stderr, "Nonce : %s\n", nonce_hex);
