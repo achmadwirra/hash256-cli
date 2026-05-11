@@ -17,11 +17,18 @@ struct MiningResult {
 __device__ __constant__ uint64_t d_challenge[4];
 __device__ __constant__ uint64_t d_difficulty[4];
 
-__device__ __forceinline__ uint64_t bswap64(uint64_t x)
+__host__ __device__ __forceinline__ uint64_t bswap64(uint64_t x)
 {
+#ifdef __CUDA_ARCH__
     uint64_t lo = __byte_perm((uint32_t)x, 0, 0x0123);
     uint64_t hi = __byte_perm((uint32_t)(x >> 32), 0, 0x0123);
     return (lo << 32) | hi;
+#else
+    x = ((x & 0x00000000FFFFFFFFULL) << 32) | ((x & 0xFFFFFFFF00000000ULL) >> 32);
+    x = ((x & 0x0000FFFF0000FFFFULL) << 16) | ((x & 0xFFFF0000FFFF0000ULL) >> 16);
+    x = ((x & 0x00FF00FF00FF00FFULL) << 8)  | ((x & 0xFF00FF00FF00FF00ULL) >> 8);
+    return x;
+#endif
 }
 
 __device__ __forceinline__ bool hash_less_than_difficulty(const uint64_t* hash)
