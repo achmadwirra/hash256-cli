@@ -160,7 +160,16 @@ async function main() {
       const startNonce = randomNonceHex();
 
       console.log("Mining...");
-      const result = await runGpuMiner(challenge, diffHex, startNonce);
+      // Start background watcher: polls challenge every 30s, kills kernel if changed.
+      // Prevents wasting compute on stale challenge (epoch rotates every ~20 min).
+      const watcher = startChallengeWatcher(contract, wallet.address, challenge);
+      const result = await runGpuMiner(challenge, diffHex, startNonce, watcher);
+      watcher.stop();
+
+      if (watcher.staleDetected) {
+        console.log("Challenge went stale mid-mining. Fetching fresh challenge...");
+        continue;
+      }
 
       if (result) {
         console.log(`*** FOUND *** ${result.hashrate} GH/s, ${result.elapsed}s`);
@@ -176,8 +185,6 @@ async function main() {
           continue;
         }
 
-        // Fire submit async. Don't await — GPU starts next round immediately.
-        // Submit runs in background, logs result when receipt arrives.
         if (pendingSubmit) {
           try { await pendingSubmit; } catch (_) {}
         }
@@ -198,9 +205,34 @@ async function main() {
   }
 }
 
+function startChallengeWatcher(contract, address, originalChallenge) {
+  const state = { staleDetected: false, killFn: null, interval: null, stopped: false };
+
+  state.interval = setInterval(async () => {
+    if (state.stopped) return;
+    try {
+      const current = await contract.getChallenge(address);
+      if (current !== originalChallenge && !state.stopped) {
+        state.staleDetected = true;
+        console.log("\n[watcher] Challenge changed — killing kernel...");
+        if (state.killFn) state.killFn();
+      }
+    } catch (_) {}
+  }, 30000);
+
+  return {
+    setKillFn: (fn) => { state.killFn = fn; },
+    get staleDetected() { return state.staleDetected; },
+    stop: () => {
+      state.stopped = true;
+      if (state.interval) clearInterval(state.interval);
+    },
+  };
+}
+
 const ROUND_TIMEOUT_MS = parseInt(process.env.ROUND_TIMEOUT || "0") * 1000;
 
-function runGpuMiner(challenge, difficulty, startNonce) {
+function runGpuMiner(challenge, difficulty, startNonce, watcher) {
   return new Promise((resolve, reject) => {
     const args = [challenge, difficulty, startNonce, BATCH_SIZE];
     const proc = spawn(MINER_BINARY, args, {
@@ -210,11 +242,18 @@ function runGpuMiner(challenge, difficulty, startNonce) {
     let stdout = "";
     let killed = false;
 
+    const killProc = () => {
+      if (!killed) {
+        killed = true;
+        proc.kill("SIGTERM");
+      }
+    };
+    if (watcher) watcher.setKillFn(killProc);
+
     let timeout = null;
     if (ROUND_TIMEOUT_MS > 0) {
       timeout = setTimeout(() => {
-        killed = true;
-        proc.kill("SIGTERM");
+        killProc();
         console.log(`\nTimeout (${ROUND_TIMEOUT_MS / 1000}s) — restarting...`);
       }, ROUND_TIMEOUT_MS);
     }
