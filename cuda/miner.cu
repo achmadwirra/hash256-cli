@@ -109,8 +109,6 @@ __global__ void mine_kernel_multi(
 
     for (uint32_t iter = 0; iter < iterations; iter++)
     {
-        if (result->found) return;
-
         input[6] = bswap64(nonce_hi);
         input[7] = bswap64(nonce_lo);
 
