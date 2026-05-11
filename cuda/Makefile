@@ -1,5 +1,5 @@
 NVCC = nvcc
-NVCC_FLAGS = -O3 -use_fast_math --ptxas-options=-v -maxrregcount=64
+NVCC_FLAGS = -O3 -use_fast_math
 TARGET = hash256_miner
 
 ARCH ?= sm_75

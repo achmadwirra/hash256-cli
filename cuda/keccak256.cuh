@@ -24,7 +24,7 @@ __device__ __forceinline__ void keccak_f1600(uint64_t state[25])
 {
     uint64_t t, bc[5];
 
-    #pragma unroll 1
+    #pragma unroll
     for (int round = 0; round < 24; round++)
     {
         bc[0] = state[0] ^ state[5] ^ state[10] ^ state[15] ^ state[20];
