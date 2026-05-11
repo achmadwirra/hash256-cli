@@ -114,11 +114,10 @@ async function main() {
             continue;
           }
 
-          // Submit with aggressive gas to win race
           const feeData = await provider.getFeeData();
-          const maxPriority = feeData.maxPriorityFeePerGas || 100000000n; // 0.1 gwei fallback
-          const boostPriority = maxPriority * 3n; // 3x priority to front-run
-          const maxFee = (feeData.maxFeePerGas || 1000000000n) + boostPriority;
+          const baseFee = feeData.maxFeePerGas || 1000000000n;
+          const boostPriority = 5000000000n; // 5 gwei priority - competitive with other miners
+          const maxFee = baseFee + boostPriority;
 
           console.log(`Submitting with priority ${ethers.formatUnits(boostPriority, "gwei")} gwei...`);
 
