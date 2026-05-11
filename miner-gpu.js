@@ -35,6 +35,67 @@ function randomNonceHex() {
   return "0x" + bytes.toString("hex");
 }
 
+async function getSafeBaseFee(provider, feeData) {
+  if (feeData && feeData.maxFeePerGas) return feeData.maxFeePerGas;
+  try {
+    const block = await provider.getBlock("latest");
+    if (block && block.baseFeePerGas) return block.baseFeePerGas * 2n;
+  } catch (_) {}
+  return 30000000000n;
+}
+
+async function submitMine(contract, provider, nonceBI, challenge, state, result, consecutiveFailsRef) {
+  try {
+    const [currentChallenge, freshFee] = await Promise.all([
+      contract.getChallenge(contract.runner.address),
+      provider.getFeeData(),
+    ]);
+    if (currentChallenge !== challenge) {
+      console.log("Challenge changed — epoch rotated. Skipping submit.");
+      return;
+    }
+
+    const boostPriority = PRIORITY_GWEI * 1000000000n;
+    const baseFee = await getSafeBaseFee(provider, freshFee);
+    const maxFee = baseFee + boostPriority;
+
+    const tx = await contract.mine(nonceBI, {
+      maxPriorityFeePerGas: boostPriority,
+      maxFeePerGas: maxFee,
+    });
+    console.log(`TX: ${tx.hash}`);
+
+    const receipt = await tx.wait();
+    if (receipt.status === 1) {
+      const reward = ethers.formatUnits(state.reward, 18);
+      console.log(`OK Block ${receipt.blockNumber} | +${reward} HASH`);
+      sendTelegram(
+        `<b>Mining Success</b>\n\n` +
+        `+${reward} HASH\n` +
+        `Block: ${receipt.blockNumber}\n` +
+        `GPU: ${GPU_ID} | ${result.hashrate} GH/s\n` +
+        `Time: ${result.elapsed}s\n` +
+        `TX: <a href="https://etherscan.io/tx/${tx.hash}">${tx.hash.slice(0, 18)}...</a>`
+      );
+      consecutiveFailsRef.count = 0;
+    } else {
+      console.log("Reverted on-chain");
+      consecutiveFailsRef.count++;
+    }
+  } catch (err) {
+    const msg = err.shortMessage || err.message || "";
+    if (msg.includes("revert") || msg.includes("execution")) {
+      console.log("Race lost — next round...");
+      sendTelegram(`Race lost\nGPU: ${GPU_ID}\nElapsed: ${result.elapsed}s`);
+    } else if (msg.includes("nonce") || msg.includes("replacement")) {
+      console.log("TX nonce conflict — skipping (will retry on next find)");
+    } else {
+      console.error("TX error:", msg);
+    }
+    consecutiveFailsRef.count++;
+  }
+}
+
 async function main() {
   requireEnv();
 
@@ -50,9 +111,8 @@ async function main() {
   console.log("Priority:", PRIORITY_GWEI.toString(), "gwei");
   console.log("=".repeat(55));
 
-  // Self-test: verify GPU kernel matches CPU hash
-  // With difficulty=MAX, every nonce is a solution. GPU returns whichever thread wins the race.
-  // We verify by computing CPU hash for the GPU's returned nonce and comparing.
+  // Self-test: difficulty=MAX means every nonce wins; atomicCAS picks any thread.
+  // Verify by hashing GPU's returned nonce on CPU and comparing.
   console.log("Running GPU self-test...");
   const testChallenge = "0x6162636465666768696a6b6c6d6e6f707172737475767778797a303132333435";
   const testNonce = "0x0000000000000000000000000000000000000000000000000000000000003039";
@@ -61,7 +121,6 @@ async function main() {
     console.error("SELF-TEST FAILED: GPU returned no result");
     process.exit(1);
   }
-  // Verify: compute CPU hash for the nonce GPU actually returned
   const gpuNonce = BigInt(selfTestResult.nonce);
   const expectedHash = ethers.solidityPackedKeccak256(
     ["bytes32", "uint256"],
@@ -74,11 +133,12 @@ async function main() {
     console.error("  Nonce:", selfTestResult.nonce);
     process.exit(1);
   }
-  console.log("✅ Self-test passed — GPU kernel verified");
+  console.log("Self-test passed — GPU kernel verified");
   console.log("");
 
   let session = 0;
-  let consecutiveFails = 0;
+  const consecutiveFailsRef = { count: 0 };
+  let pendingSubmit = null;
 
   while (true) {
     session++;
@@ -93,7 +153,7 @@ async function main() {
       const diffHex = "0x" + difficulty.toString(16).padStart(64, "0");
 
       console.log("");
-      console.log(`── Round ${session} [${new Date().toLocaleTimeString()}] GPU:${GPU_ID} ──`);
+      console.log(`-- Round ${session} [${new Date().toLocaleTimeString()}] GPU:${GPU_ID} --`);
       console.log("Difficulty:", diffHex.slice(0, 20) + "...");
       console.log("Epoch     :", state.epoch.toString(), `(${state.epochBlocksLeft_.toString()} blocks left)`);
 
@@ -116,61 +176,19 @@ async function main() {
           continue;
         }
 
-        const [currentChallenge, freshFee] = await Promise.all([
-          contract.getChallenge(wallet.address),
-          provider.getFeeData(),
-        ]);
-        if (currentChallenge !== challenge) {
-          console.log("Challenge changed — epoch rotated. Next round...");
-          continue;
+        // Fire submit async. Don't await — GPU starts next round immediately.
+        // Submit runs in background, logs result when receipt arrives.
+        if (pendingSubmit) {
+          try { await pendingSubmit; } catch (_) {}
         }
+        pendingSubmit = submitMine(
+          contract, provider, nonceBI, challenge, state, result, consecutiveFailsRef
+        );
 
-        const boostPriority = PRIORITY_GWEI * 1000000000n;
-        const baseFee = freshFee.maxFeePerGas || 1000000000n;
-        const maxFee = baseFee + boostPriority;
-
-        try {
-          const tx = await contract.mine(nonceBI, {
-            maxPriorityFeePerGas: boostPriority,
-            maxFeePerGas: maxFee,
-          });
-          console.log(`TX: ${tx.hash}`);
-
-          const receipt = await tx.wait();
-          if (receipt.status === 1) {
-            const reward = ethers.formatUnits(state.reward, 18);
-            console.log(`✅ Block ${receipt.blockNumber} | +${reward} HASH`);
-            sendTelegram(
-              `⛏️ <b>Mining Success!</b>\n\n` +
-              `+${reward} HASH\n` +
-              `Block: ${receipt.blockNumber}\n` +
-              `GPU: ${GPU_ID} | ${result.hashrate} GH/s\n` +
-              `Time: ${result.elapsed}s\n` +
-              `TX: <a href="https://etherscan.io/tx/${tx.hash}">${tx.hash.slice(0, 18)}...</a>`
-            );
-            consecutiveFails = 0;
-          } else {
-            console.log("❌ Reverted on-chain");
-            consecutiveFails++;
-          }
-        } catch (err) {
-          const msg = err.shortMessage || err.message || "";
-          if (msg.includes("revert") || msg.includes("execution")) {
-            console.log("Race lost — next round...");
-            sendTelegram(`❌ Race lost\nGPU: ${GPU_ID}\nElapsed: ${result.elapsed}s`);
-          } else if (msg.includes("nonce") || msg.includes("replacement")) {
-            console.log("TX nonce conflict — retrying in 5s...");
-            await sleep(5000);
-          } else {
-            console.error("TX error:", msg);
-          }
-          consecutiveFails++;
-        }
-
-        if (consecutiveFails >= 5) {
+        if (consecutiveFailsRef.count >= 5) {
           console.log("5 consecutive fails — cooling down 30s...");
           await sleep(30000);
-          consecutiveFails = 0;
+          consecutiveFailsRef.count = 0;
         }
       }
     } catch (err) {
@@ -215,8 +233,22 @@ function runGpuMiner(challenge, difficulty, startNonce) {
         resolve(null);
       } else if (code === 0 && stdout.trim()) {
         try {
-          const result = JSON.parse(stdout.trim().split("\n").pop());
-          resolve(result);
+          // CUDA binary prints JSON as the last line of stdout.
+          const lines = stdout.trim().split("\n");
+          let jsonLine = null;
+          for (let i = lines.length - 1; i >= 0; i--) {
+            const t = lines[i].trim();
+            if (t.startsWith("{") && t.endsWith("}")) {
+              jsonLine = t;
+              break;
+            }
+          }
+          if (!jsonLine) {
+            console.error("No JSON in miner output:", stdout);
+            resolve(null);
+            return;
+          }
+          resolve(JSON.parse(jsonLine));
         } catch (e) {
           console.error("Parse error:", stdout);
           resolve(null);
@@ -250,8 +282,14 @@ function sendTelegram(message) {
   const req = https.request(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+    timeout: 5000,
   });
-  req.on("error", () => {});
+  req.on("error", (err) => {
+    console.error("Telegram error:", err.message);
+  });
+  req.on("timeout", () => {
+    req.destroy();
+  });
   req.write(payload);
   req.end();
 }
