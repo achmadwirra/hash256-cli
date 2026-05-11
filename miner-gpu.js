@@ -116,7 +116,7 @@ async function main() {
 
           const feeData = await provider.getFeeData();
           const baseFee = feeData.maxFeePerGas || 1000000000n;
-          const boostPriority = 5000000000n; // 5 gwei priority - competitive with other miners
+          const boostPriority = 10000000000n; // 10 gwei priority
           const maxFee = baseFee + boostPriority;
 
           console.log(`Submitting with priority ${ethers.formatUnits(boostPriority, "gwei")} gwei...`);
