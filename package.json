@@ -5,6 +5,7 @@
   "main": "miner.js",
   "scripts": {
     "start": "node miner.js",
+    "turbo": "node miner-turbo.js",
     "check": "node check-state.js"
   },
   "keywords": [
