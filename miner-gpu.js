@@ -50,6 +50,28 @@ async function main() {
   console.log("Priority:", PRIORITY_GWEI.toString(), "gwei");
   console.log("=".repeat(55));
 
+  // Self-test: verify GPU kernel matches CPU hash
+  console.log("Running GPU self-test...");
+  const testChallenge = "0x6162636465666768696a6b6c6d6e6f707172737475767778797a303132333435";
+  const testNonce = "0x0000000000000000000000000000000000000000000000000000000000003039";
+  const selfTestResult = await runGpuMiner(testChallenge, "0x" + "ff".repeat(32), testNonce);
+  if (!selfTestResult) {
+    console.error("SELF-TEST FAILED: GPU returned no result");
+    process.exit(1);
+  }
+  const expectedHash = ethers.solidityPackedKeccak256(
+    ["bytes32", "uint256"],
+    [testChallenge, BigInt("0x3039")]
+  );
+  if (selfTestResult.hash !== expectedHash) {
+    console.error("SELF-TEST FAILED: GPU hash mismatch");
+    console.error("  GPU:", selfTestResult.hash);
+    console.error("  CPU:", expectedHash);
+    process.exit(1);
+  }
+  console.log("✅ Self-test passed — GPU kernel verified");
+  console.log("");
+
   let session = 0;
   let consecutiveFails = 0;
 
