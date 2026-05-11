@@ -99,21 +99,19 @@ __global__ void mine_kernel_multi(
     uint64_t nonce_hi = start_nonce_hi;
     if (nonce_lo < start_nonce_lo) nonce_hi++;
 
-    uint64_t input[8];
-    input[0] = bswap64(d_challenge[0]);
-    input[1] = bswap64(d_challenge[1]);
-    input[2] = bswap64(d_challenge[2]);
-    input[3] = bswap64(d_challenge[3]);
-    input[4] = 0;
-    input[5] = 0;
+    uint64_t c0 = bswap64(d_challenge[0]);
+    uint64_t c1 = bswap64(d_challenge[1]);
+    uint64_t c2 = bswap64(d_challenge[2]);
+    uint64_t c3 = bswap64(d_challenge[3]);
+
+    uint64_t nonce_hi_le = bswap64(nonce_hi);
 
     for (uint32_t iter = 0; iter < iterations; iter++)
     {
-        input[6] = bswap64(nonce_hi);
-        input[7] = bswap64(nonce_lo);
+        uint64_t nonce_lo_le = bswap64(nonce_lo);
 
         uint64_t hash[4];
-        keccak256_64bytes(input, hash);
+        keccak256_mining(c0, c1, c2, c3, nonce_hi_le, nonce_lo_le, hash);
 
         if (hash_less_than_difficulty(hash))
         {
@@ -131,7 +129,11 @@ __global__ void mine_kernel_multi(
         }
 
         nonce_lo += total_threads;
-        if (nonce_lo < total_threads) nonce_hi++;
+        if (nonce_lo < total_threads)
+        {
+            nonce_hi++;
+            nonce_hi_le = bswap64(nonce_hi);
+        }
     }
 }
 
@@ -227,7 +229,7 @@ int main(int argc, char** argv)
     }
     else
     {
-        iterations = 1536;
+        iterations = 4096;
         batch_size = total_threads * iterations;
     }
 

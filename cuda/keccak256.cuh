@@ -91,22 +91,80 @@ __device__ __forceinline__ void keccak256_64bytes(
 {
     uint64_t state[25];
 
-    #pragma unroll
-    for (int i = 0; i < 25; i++)
-        state[i] = 0;
-
-    #pragma unroll
-    for (int i = 0; i < 8; i++)
-        state[i] = input[i];
-
-    state[8] ^= 0x0000000000000001ULL;
-    state[16] ^= 0x8000000000000000ULL;
+    state[0] = input[0];
+    state[1] = input[1];
+    state[2] = input[2];
+    state[3] = input[3];
+    state[4] = input[4];
+    state[5] = input[5];
+    state[6] = input[6];
+    state[7] = input[7];
+    state[8] = 0x0000000000000001ULL;
+    state[9] = 0;
+    state[10] = 0;
+    state[11] = 0;
+    state[12] = 0;
+    state[13] = 0;
+    state[14] = 0;
+    state[15] = 0;
+    state[16] = 0x8000000000000000ULL;
+    state[17] = 0;
+    state[18] = 0;
+    state[19] = 0;
+    state[20] = 0;
+    state[21] = 0;
+    state[22] = 0;
+    state[23] = 0;
+    state[24] = 0;
 
     keccak_f1600(state);
 
-    #pragma unroll
-    for (int i = 0; i < 4; i++)
-        output[i] = state[i];
+    output[0] = state[0];
+    output[1] = state[1];
+    output[2] = state[2];
+    output[3] = state[3];
+}
+
+__device__ __forceinline__ void keccak256_mining(
+    uint64_t c0, uint64_t c1, uint64_t c2, uint64_t c3,
+    uint64_t nonce_hi_le, uint64_t nonce_lo_le,
+    uint64_t* output
+)
+{
+    uint64_t state[25];
+
+    state[0] = c0;
+    state[1] = c1;
+    state[2] = c2;
+    state[3] = c3;
+    state[4] = 0;
+    state[5] = 0;
+    state[6] = nonce_hi_le;
+    state[7] = nonce_lo_le;
+    state[8] = 0x0000000000000001ULL;
+    state[9] = 0;
+    state[10] = 0;
+    state[11] = 0;
+    state[12] = 0;
+    state[13] = 0;
+    state[14] = 0;
+    state[15] = 0;
+    state[16] = 0x8000000000000000ULL;
+    state[17] = 0;
+    state[18] = 0;
+    state[19] = 0;
+    state[20] = 0;
+    state[21] = 0;
+    state[22] = 0;
+    state[23] = 0;
+    state[24] = 0;
+
+    keccak_f1600(state);
+
+    output[0] = state[0];
+    output[1] = state[1];
+    output[2] = state[2];
+    output[3] = state[3];
 }
 
 #endif
